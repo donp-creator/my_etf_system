@@ -7,7 +7,9 @@ def get_stock_features(ticker, period="10y"):
     """下载特定股票的历史数据，并生成基础的数据科学特征矩阵"""
     try:
         # 1. 下载数据（默认拉取10年，你也可以在app里改）
-        df = yf.download(ticker, period=period)
+                # 显式关闭多线程和进度条，确保云端 Linux 环境 100% 稳定下载
+        df = yf.download(ticker, period=period, group_by='column', auto_adjust=True, prepost=False, threads=False, progress=False)
+
 
         if df.empty:
             return None
