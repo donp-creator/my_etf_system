@@ -209,3 +209,7 @@ if selected_ticker in all_dfs:
     fig.update_layout(
         title=f"{selected_ticker} 过去500天长线回归轨道",
         yaxis_type="log", xaxis_title="日期", yaxis_title="价格 (对数轴)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=10, r=10, t=40, b=10)
+    )
+    st.plotly_chart(fig, use_container_width=True)
