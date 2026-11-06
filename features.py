@@ -5,7 +5,7 @@ import pandas as pd
 import yfinance as yf
 
 def get_stock_features(ticker, period="10y"):
-    """下载特定股票的历史数据（优先读取本地离线CSV缓存），并生成数据科学特征矩阵"""
+    """下载特定股票/ETF/虚拟币的历史数据（优先读取本地离线CSV缓存），并生成数据科学特征矩阵"""
     # 1. 建立本地硬盘缓存目录
     cache_dir = "cache_data"
     if not os.path.exists(cache_dir):
@@ -60,9 +60,10 @@ def get_stock_features(ticker, period="10y"):
 
     # 4. 数据科学特征矩阵工程
     try:
-        # 安全清洗：先用前向填充修复可能由于刚收盘产生的 NaN 缺失值
+        # 安全清洗：前向+后向填充修复可能存在的 NaN 缺失值
         df = df.ffill().bfill()
 
+        # 兼容性多重保险列名对齐
         if "Close" in df.columns:
             df["Price"] = df["Close"]
         elif "close" in df.columns:
@@ -74,9 +75,13 @@ def get_stock_features(ticker, period="10y"):
 
         df["Return"] = df["Price"].pct_change()
 
-        # 基础时间序列指标
-        df["MA_50"] = df["Price"].rolling(window=50).mean()
-        df["MA_250"] = df["Price"].rolling(window=250).mean()
+        # 基础时间序列指标：如果数据量太少（比如新上市的币圈ETF），动态减小滚动窗口防止返回NaN
+        total_rows = len(df)
+        ma_window_short = min(50, max(5, int(total_rows / 4)))
+        ma_window_long = min(250, max(10, int(total_rows / 2)))
+
+        df["MA_50"] = df["Price"].rolling(window=ma_window_short).mean()
+        df["MA_250"] = df["Price"].rolling(window=ma_window_long).mean()
 
         # 过去10天的最高价和最低价
         df["Rolling_Max_10"] = df["Price"].rolling(window=10).max()
@@ -99,12 +104,14 @@ def get_stock_features(ticker, period="10y"):
             
         df["Z_Score"] = (log_prices - fitted_log_prices) / res_std
 
-        # 🚀 【关键修正】：只在最后提取有效行，绝对不盲目 dropna 毁掉全表
-        # 250日均线需要250个起点数据，所以我们切片保留有均线数据的后半段
-        df = df.iloc[250:].copy()
+        # 🚀 【自适应动态切片补丁】：完美兼容新老资产，绝不丢出空DataFrame
+        # 只有在总行数远大于长期均线窗口时，才进行头部切片去噪；否则保留完整行数并前向填充
+        df = df.ffill().bfill()
+        if total_rows > ma_window_long:
+            df = df.iloc[ma_window_long:].copy()
         
-        print(f"⚙️ [DEBUG] {ticker} 价格特征对齐成功，当前最新真实价格为: {df['Price'].iloc[-1]:.2f}")
-        print(f"✅ [DEBUG] {ticker} 全部特征矩阵计算大获成功！矩阵最终形状为: {df.shape}")
+        print(f"⚙️ [DEBUG] {ticker} 价格对齐成功，当前最新真实价格为: {df['Price'].iloc[-1]:.2f}")
+        print(f"✅ [DEBUG] {ticker} 全部特征矩阵计算大获成功！最终矩阵形状为: {df.shape}")
         return df
 
     except Exception as e:
