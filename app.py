@@ -1,3 +1,4 @@
+import logging
 import re
 import streamlit as st
 import pandas as pd
@@ -19,7 +20,7 @@ st.caption("长线趋势追踪 + 基本面多因子 + 宏观事件驱动决策�
 st.sidebar.header("⚙️ 全局系统配置")
 ticker_input = st.sidebar.text_input(
     "输入你要监控的股票/ETF (英文逗号隔开):", 
-    "SPY, VOO, QQQ, QQQE, RSP, SOXX, MOAT, SCHD, VYM, NOBL, VIG, SPLV, COW, IWY, FXI, MCHI, IEFA, EWJ, EWW, DIA, IWM, VGT, XLK, XLY, XLP, XLV, XLF, XLI, XLB, XLRE, XLU, XLE, GDX, GLD, NVDA, MSTR, AAPL, MSFT, GOOG, AMZN, SMH, UNH, APP, BRK.B, GEV, SPCX, TSLA, VRT, BE, HOOD, URA, UMAC, BTCL, CRCL, NBIS, MU, LITE, CIFR, UUUU, ALAB, RKLB,  META, INTC"
+    "SPY, VOO, QQQ, QQQE, RSP, SOXX, MOAT, SCHD, VYM, NOBL, VIG, SPLV, COW, IWY, FXI, MCHI, ASHR, IEFA, EWJ, EWW, DIA, IWM, VGT, XLK, XLY, XLP, XLV, XLF, XLI, XLB, XLRE, XLU, XLE, GDX, GLD, VNQ, SHY, IEF, TLT, LQD, HYG, BND, BITO, FBTC, IBIT, NVDA, MSTR, AAPL, MSFT, GOOG, AMZN, SMH, UNH, APP, BRK.B, GEV, SPCX, TSLA, VRT, BE, HOOD, URA, UMAC, BTCL, CRCL, NBIS, MU, LITE, CIFR, UUUU, ALAB, RKLB,  META, INTC"
 )
 tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
@@ -57,6 +58,7 @@ def run_system_scan(ticker_list):
                     "Priority_Score": priority_score
                 })
         except Exception as e:
+            logging.getLogger(__name__).exception("扫描 %s 失败", ticker)
             st.sidebar.warning(f"解析 {ticker} 失败: {e}")
             
     if not summary_data:
