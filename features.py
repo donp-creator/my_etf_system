@@ -5,7 +5,7 @@ import pandas as pd
 import yfinance as yf
 
 def get_stock_features(ticker, period="10y"):
-    """下载历史时序数据，采用双重保险算法交叉合并财务估值指标，完美适配新上市拆分巨头与虚拟币信托"""
+    """下载历史时序数据，采用三层降级防弹算法：优先计算分析师预期Double Beat，次优降级静态季报环比，末尾安全熔断"""
     # 1. 建立离线硬盘缓存
     cache_dir = "cache_data"
     if not os.path.exists(cache_dir):
@@ -42,10 +42,11 @@ def get_stock_features(ticker, period="10y"):
             print(f"❌ 网络下载时序失败 {ticker}: {e}")
             return None
 
-    # 3. 🚀【双重保险因子注入】：全面防御新上市拆分资产的市值断层
+    # 3. 🚀【多因子三重保险注入层】
     valuation_metrics = {
         "市值": "-", "Trailing_PE": "-", "Forward_PE": "-", 
-        "PEG_Ratio": "-", "市现率_PCF": "-", "自由现金流收益率": "-"
+        "PEG_Ratio": "-", "市现率_PCF": "-", "自由现金流收益率": "-",
+        "最新财报战绩": "-"
     }
     
     try:
@@ -53,38 +54,96 @@ def get_stock_features(ticker, period="10y"):
         info = ticker_obj.info
         f_info = ticker_obj.fast_info
         
-        # 🚀【第一道保险】：先用快速快照提取市值
+        # 提取市值双重保险
         m_cap = 0
         if f_info and "market_cap" in f_info and f_info["market_cap"] > 0:
             m_cap = f_info["market_cap"]
-            
-        # 🚀【第二道保险】：如果快速快照是空，或者新资产没记录，强行降级去读取完整的财务结构大表
         if m_cap == 0 and info and "marketCap" in info:
             m_cap = info["marketCap"]
             
-        # 格式化输出市值
-        if m_cap and m_cap >= 1e12:
-            valuation_metrics["市值"] = f"${m_cap / 1e12:.2f}T"
-        elif m_cap and m_cap >= 1e9:
-            valuation_metrics["市值"] = f"${m_cap / 1e9:.2f}B"
-        elif m_cap and m_cap > 0:
-            valuation_metrics["市值"] = f"${m_cap / 1e6:.1f}M"
+        if m_cap and m_cap >= 1e12: valuation_metrics["市值"] = f"${m_cap / 1e12:.2f}T"
+        elif m_cap and m_cap >= 1e9: valuation_metrics["市值"] = f"${m_cap / 1e9:.2f}B"
+        elif m_cap and m_cap > 0: valuation_metrics["市值"] = f"${m_cap / 1e6:.1f}M"
                 
-        # 抓取财务多重估值乘数
+        # 抓取基本面核心乘数
         if info:
             if info.get("trailingPE"): valuation_metrics["Trailing_PE"] = round(info["trailingPE"], 1)
             if info.get("forwardPE"): valuation_metrics["Forward_PE"] = round(info["forwardPE"], 1)
             if info.get("pegRatio"): valuation_metrics["PEG_Ratio"] = round(info["pegRatio"], 2)
             if info.get("priceToCashFlow"): valuation_metrics["市现率_PCF"] = round(info["priceToCashFlow"], 1)
             
-            # 自由现金流收益率
             fcf = info.get("freeCashflow") or info.get("operatingCashflow", 0)
             if fcf and m_cap and m_cap > 0:
                 fcf_yield = (fcf / m_cap) * 100
-                if fcf_yield > 0:
-                    valuation_metrics["自由现金流收益率"] = f"{fcf_yield:.1f}%"
+                if fcf_yield > 0: valuation_metrics["自由现金流收益率"] = f"{fcf_yield:.1f}%"
+
+        # 🚀🚀🚀【三层降级防弹算法核心】🚀🚀🚀
+        report_success = False
+        
+        # 🥇 【第一层保险】：优先穿透分析师预期矩阵计算 Double Beat
+        try:
+            h_earnings = ticker_obj.get_earnings_history(limit=4)
+            if h_earnings is not None and len(h_earnings) > 0:
+                latest_report = None
+                for report in h_earnings:
+                    if report.get("epsActual") is not None and report.get("epsEstimate") is not None:
+                        latest_report = report
+                        break
+                
+                if latest_report:
+                    eps_act, eps_est = latest_report.get("epsActual"), latest_report.get("epsEstimate")
+                    rev_act, rev_est = latest_report.get("revenueActual"), latest_report.get("revenueEstimate")
+                    
+                    eps_beat = eps_act > eps_est if (eps_act is not None and eps_est is not None) else False
+                    rev_beat = rev_act > rev_est if (rev_act is not None and rev_est is not None) else False
+                    
+                    if eps_beat and rev_beat:
+                        eps_surprise = ((eps_act - eps_est) / abs(eps_est)) * 100 if eps_est != 0 else 0
+                        valuation_metrics["最新财报战绩"] = f"🔥 Double Beat (+{eps_surprise:.1f}%)"
+                    elif (not eps_beat) and (not rev_beat):
+                        valuation_metrics["最新财报战绩"] = "🚨 Double Miss"
+                    elif eps_beat and (not rev_beat):
+                        valuation_metrics["最新财报战绩"] = "✨ EPS Beat / 营收 Miss"
+                    else:
+                        valuation_metrics["最新财报战绩"] = "✨ 营收 Beat / EPS Miss"
+                    report_success = True
+        except Exception:
+            pass
+
+        # 🥈 【第二层保险】：如果第一层掉链子返回了空，自动无缝降级读取底层的季度利润大表算“环比”
+        if not report_success:
+            try:
+                q_financials = ticker_obj.quarterly_financials
+                if q_financials is not None and not q_financials.empty:
+                    income_labels = ["Net Income", "Operating Income", "Gross Profit"]
+                    target_row = None
+                    for label in income_labels:
+                        if label in q_financials.index:
+                            target_row = q_financials.loc[label]
+                            break
+                    
+                    if target_row is not None and len(target_row) >= 2:
+                        latest_quarter_val = float(target_row.iloc[0])
+                        prev_quarter_val = float(target_row.iloc[1])
+                        
+                        if latest_quarter_val > prev_quarter_val and latest_quarter_val > 0:
+                            growth_pct = ((latest_quarter_val - prev_quarter_val) / abs(prev_quarter_val)) * 100
+                            valuation_metrics["最新财报战绩"] = f"📈 利润环比大超 (+{growth_pct:.1f}%)"
+                        elif latest_quarter_val < prev_quarter_val:
+                            growth_pct = ((latest_quarter_val - prev_quarter_val) / abs(prev_quarter_val)) * 100
+                            valuation_metrics["最新财报战绩"] = f"📉 利润环比下滑 ({growth_pct:.1f}%)"
+                        else:
+                            valuation_metrics["最新财报战绩"] = "⚖️ 环比基本持平"
+                        report_success = True
+            except Exception:
+                pass
+
+        # 🥉 【第三层】：如果前两层都拿不到数据（如 GLD 黄金信托等衍生品），最后安全兜底为 "-"
+        if not report_success:
+            valuation_metrics["最新财报战绩"] = "-"
+
     except Exception as e:
-        print(f"💡 提示：{ticker} 属于指数/大宗商品，自动跳过企业基本面因子注入。")
+        print(f"💡 提示：{ticker} 属于衍生资产，自动跳过基本面因子注入。")
 
     # 4. 数据科学特征工程计算
     try:
@@ -113,7 +172,6 @@ def get_stock_features(ticker, period="10y"):
             df = df.iloc[250:].copy()
 
         df.attrs["valuation"] = valuation_metrics
-        print(f"✅ [DEBUG] {ticker} 特征与双重基本面因子完美熔接。")
         return df
 
     except Exception as e:
