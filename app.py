@@ -1,7 +1,9 @@
+import re
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 from html import escape
+from urllib.parse import quote
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from features import get_stock_features
@@ -17,7 +19,7 @@ st.caption("长线趋势追踪 + 基本面多因子 + 宏观事件驱动决策�
 st.sidebar.header("⚙️ 全局系统配置")
 ticker_input = st.sidebar.text_input(
     "输入你要监控的股票/ETF (英文逗号隔开):", 
-    "SPY, VOO, QQQ, QQQE, RSP, SOXX, MOAT, SCHD, VYM, NOBL, VIG, SPLV, COW, IWY, FXI, MCHI, ASHR, IEFA, EWJ, EWW, DIA, IWM, VGT, XLK, XLY, XLP, XLV, XLF, XLI, XLB, XLRE, XLU, XLE, GDX, GLD, VNQ, SHY, IEF, TLT, LQD, HYG, BND, BITO, FBTC, IBIT, NVDA, MSTR, AAPL, MSFT, GOOG, AMZN, SMH, UNH, APP, BRK.B, GEV, SPCX, TSLA, VRT, BE, HOOD, URA, UMAC, BTCL, CRCL, NBIS, MU, LITE, CIFR, UUUU, ALAB, RKLB,  META, INTC"
+    "SPY, VOO, QQQ, QQQE, RSP, SOXX, MOAT, SCHD, VYM, NOBL, VIG, SPLV, COW, IWY, FXI, MCHI, IEFA, EWJ, EWW, DIA, IWM, VGT, XLK, XLY, XLP, XLV, XLF, XLI, XLB, XLRE, XLU, XLE, GDX, GLD, NVDA, MSTR, AAPL, MSFT, GOOG, AMZN, SMH, UNH, APP, BRK.B, GEV, SPCX, TSLA, VRT, BE, HOOD, URA, UMAC, BTCL, CRCL, NBIS, MU, LITE, CIFR, UUUU, ALAB, RKLB,  META, INTC"
 )
 tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
@@ -179,11 +181,77 @@ else:
 
 st.markdown("---")
 
+SOXX_DETAILS = """
+<p><b>基本资料</b><br>
+发行机构：贝莱德 iShares<br>
+成立日期：2001 年 7 月 10 日<br>
+追踪指数：NYSE Semiconductor Index<br>
+费用率：0.33%（发行方资料，2026-11-05）<br>
+配息频率：季度</p>
+<p><b>持仓与权重</b><br>
+覆盖芯片设计、制造及设备。指数采用修正的流通市值加权，持仓和权重见发行方页面。</p>
+<p><b>横向对比</b><br>
+SOXX vs SMH：两者追踪不同的半导体指数。SMH 追踪 MVIS US Listed Semiconductor 25 Index。比较集中度时可看两只基金同一日期的前十大持仓占比。<br>
+SOXX vs SOXL：SOXX 无杠杆。SOXL 目标为同一指数单日表现的 3 倍（费用前），多日累计表现受每日重置和复利影响。</p>
+<p><b>需要知道</b><br>
+行业集中于半导体，表现会受芯片需求、资本开支和行业周期影响。</p>
+<p><a href="https://www.ishares.com/us/products/239705/ishares-semiconductor-etf" target="_blank" rel="noopener noreferrer">iShares 资料与持仓</a> ·
+<a href="https://www.vaneck.com/us/en/investments/semiconductor-etf-smh-fact-sheet.pdf" target="_blank" rel="noopener noreferrer">SMH 资料</a> ·
+<a href="https://www.direxion.com/product/daily-semiconductor-bull-bear-3x-etfs" target="_blank" rel="noopener noreferrer">SOXL 资料</a></p>
+"""
+
+
 @st.cache_data(ttl=86400)
-def get_ticker_type(ticker):
+def get_ticker_profile(ticker):
+    if ticker == "SOXX":
+        return (
+            "ETF · 非等权重",
+            "贝莱德旗下 iShares 发行的美股半导体 ETF，全称 iShares Semiconductor ETF。",
+            SOXX_DETAILS,
+        )
+
     yahoo_symbol = "BRK-B" if ticker == "BRK.B" else ticker
-    quote_type = yf.Ticker(yahoo_symbol).get_info().get("quoteType")
-    return {"EQUITY": "个股", "ETF": "ETF"}.get(quote_type, "")
+    info = yf.Ticker(yahoo_symbol).get_info()
+    quote_type = info.get("quoteType")
+    ticker_type = {"EQUITY": "个股", "ETF": "ETF"}.get(quote_type, "")
+    description = " ".join((info.get("longBusinessSummary") or "").split())
+
+    if ticker_type == "ETF":
+        fund_name = info.get("longName") or info.get("shortName") or ""
+        weighting = {
+            "RSP": "等权重",
+            "QQQE": "等权重",
+            "SPY": "非等权重 · 市值加权",
+            "VOO": "非等权重 · 市值加权",
+            "QQQ": "非等权重 · 修正市值加权",
+        }.get(ticker)
+        if weighting is None:
+            explicitly_equal = re.search(r"\bequal(?:\s+|-)weight(?:ed)?\b", fund_name, re.I)
+            weighting = "等权重" if explicitly_equal else "权重待确认"
+        ticker_type = f"ETF · {weighting}"
+        description = description or fund_name
+
+    name = info.get("longName") or info.get("shortName") or ticker
+    if quote_type == "ETF":
+        issuer = info.get("fundFamily")
+        intro = f"{name}，由 {issuer} 发行。" if issuer else name
+    else:
+        sector = info.get("industry")
+        intro = f"{name} · {sector}" if sector else name
+        first_sentence = re.split(r"(?<=[.!?。])\s+", description, maxsplit=1)[0]
+        if first_sentence and len(first_sentence) <= 115:
+            intro = first_sentence
+
+    if len(intro) > 115:
+        intro = intro[:112].rstrip() + "…"
+    details = f"<p><b>{escape(name)}</b></p>"
+    if description and description != name:
+        details += f"<p>{escape(description)}</p>"
+    details += (
+        f'<p><a href="https://finance.yahoo.com/quote/{quote(yahoo_symbol, safe="")}/" '
+        'target="_blank" rel="noopener noreferrer">查看 Yahoo Finance 资料</a></p>'
+    )
+    return ticker_type, intro, details
 
 
 # 5. 【首屏】：自适应响应式网格推荐卡片
@@ -205,16 +273,27 @@ if "建议行动" in summary_df.columns and not summary_df.empty:
             
             ticker = row_dict["Ticker"]
             try:
-                ticker_type = get_ticker_type(ticker)
+                ticker_type, description, profile_details = get_ticker_profile(ticker)
             except Exception:
-                ticker_type = ""
+                ticker_type, description, profile_details = "", "", "<p>暂时无法获取详细资料。</p>"
             ticker_label = f"{escape(ticker)}（{ticker_type}）" if ticker_type else escape(ticker)
 
+            profile_line = (
+                f'<p style="margin: 0 0 8px; color: #475569; font-size: 13px;">'
+                f'{escape(description or "暂无可用简介")}</p>'
+            )
+
             card_html = f"""
-                <div style="flex: 1 1 290px; max-width: 360px; background-color: {bg_color}; border: 1px solid {border_color}; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); margin-bottom: 5px;">
-                    <h4 style="margin: 0 0 8px 0; color: {text_color}; font-size: 16px;">
-                        {rank_badge}{emoji} 【{row_dict['建议行动']}】{ticker_label}
-                    </h4>
+                <div style="flex: 1 1 290px; max-width: 360px; min-width: 0; overflow-wrap: anywhere; background-color: {bg_color}; border: 1px solid {border_color}; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); margin-bottom: 5px;">
+                    <details style="margin: 0 0 8px;">
+                        <summary style="color: {text_color}; font-size: 16px; font-weight: 700; cursor: pointer;">
+                            {rank_badge}{emoji} 【{row_dict['建议行动']}】{ticker_label}
+                        </summary>
+                        <div style="font-size: 13px; line-height: 1.45; padding-top: 8px;">
+                            {profile_details}
+                        </div>
+                    </details>
+                    {profile_line}
                     <p style="margin: 0; font-size: 13px; color: #31333F; line-height: 1.45;">
                         <b>当前价:</b> ${row_dict['当前价格']} | <b>市值:</b> {row_dict['市值']}<br>
                         <b>PE (滚/前):</b> {row_dict['PE (滚动/前瞻)']} | <b>PEG:</b> {row_dict['PEG比率']}<br>
