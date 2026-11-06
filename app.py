@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import yfinance as yf
+from html import escape
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from features import get_stock_features
@@ -25,7 +26,6 @@ tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 def run_system_scan(ticker_list):
     summary_data = []
     detailed_dfs = {}
-    upcoming_earnings = {} # 存储解析出的未来财报日期
     
     for ticker in ticker_list:
         try:
@@ -39,21 +39,6 @@ def run_system_scan(ticker_list):
                     "PEG_Ratio": "-", "市现率_PCF": "-", "自由现金流收益率": "-",
                     "最新财报战绩": "-"
                 })
-                
-                # 穿透捕获未来30天内的财报公布日期
-                try:
-                    ticker_obj = yf.Ticker(ticker)
-                    calendar = ticker_obj.calendar
-                    if calendar is not None and not calendar.empty and "Earnings Date" in calendar.index:
-                        e_dates = calendar.loc["Earnings Date"].values
-                        if len(e_dates) > 0:
-                            next_e_date = pd.to_datetime(e_dates[0])
-                            # 判断是否在未来30天内
-                            days_diff = (next_e_date - datetime.now()).days
-                            if 0 <= days_diff <= 30:
-                                upcoming_earnings[ticker] = next_e_date.strftime("%Y-%m-%d")
-                except Exception:
-                    pass # 商品、ETF、加密货币没有财报日历，安全熔断
                 
                 summary_data.append({
                     "Ticker": str(ticker),
@@ -73,14 +58,14 @@ def run_system_scan(ticker_list):
             st.sidebar.warning(f"解析 {ticker} 失败: {e}")
             
     if not summary_data:
-        return pd.DataFrame(), {}, {}
+        return pd.DataFrame(), {}
         
-    return pd.DataFrame(summary_data), detailed_dfs, upcoming_earnings
+    return pd.DataFrame(summary_data), detailed_dfs
 
 # 触发主扫描
 if tickers:
-    with st.spinner("正在抓取企业财务大表、分析师预期矩阵与财报事件日历..."):
-        summary_df, all_dfs, all_earnings_dates = run_system_scan(tickers)
+    with st.spinner("正在抓取行情与企业财务数据..."):
+        summary_df, all_dfs = run_system_scan(tickers)
         if not summary_df.empty:
             summary_df_table = summary_df.sort_values(by="Ticker", ascending=True).reset_index(drop=True)
         else:
@@ -103,21 +88,65 @@ macro_events = [
     {"date": "2026-12-08", "type": "🏛️ 美联储", "event": "美联储 FOMC 今年最后一轮议息会议开幕日 (12/8-12/9)"}
 ]
 
-# 合并个股财报日历
-calendar_list = []
-for ev in macro_events:
-    ev_date = datetime.strptime(ev["date"], "%Y-%m-%d")
-    days_left = (ev_date - datetime.now()).days + 1
-    calendar_list.append({
-        "date": ev["date"], "days_left": days_left, "type": ev["type"], "name": ev["event"]
-    })
+@st.cache_data(ttl=3600)
+def fetch_earnings_dates(symbol):
+    calendar = yf.Ticker(symbol).calendar
+    if isinstance(calendar, pd.DataFrame):
+        raw_dates = (
+            calendar.loc["Earnings Date"].to_numpy().ravel()
+            if "Earnings Date" in calendar.index else []
+        )
+    else:
+        raw_dates = (calendar or {}).get("Earnings Date", [])
 
-for tkr, e_dt_str in all_earnings_dates.items():
-    e_date = datetime.strptime(e_dt_str, "%Y-%m-%d")
-    days_left = (e_date - datetime.now()).days + 1
-    calendar_list.append({
-        "date": e_dt_str, "days_left": days_left, "type": "🔥 个股财报", "name": f"【{tkr}】发布最新季度官方财务财报 (季报变动核心)"
-    })
+    dates = set()
+    for value in raw_dates:
+        parsed = pd.to_datetime(value, errors="coerce")
+        if pd.notna(parsed):
+            dates.add(parsed.date())
+    return sorted(dates)
+
+
+# 以纽约市场日期为准，今天算第 1 天。
+today = pd.Timestamp.now(tz="America/New_York").date()
+last_day = today + timedelta(days=29)
+st.caption(
+    f"{today} 至 {last_day}（纽约时间）。宏观日期沿用手工清单，"
+    "财报日期来自 Yahoo Finance，可能是预计日期。"
+)
+
+calendar_list = []
+for event in macro_events:
+    event_date = datetime.strptime(event["date"], "%Y-%m-%d").date()
+    if today <= event_date <= last_day:
+        calendar_list.append({
+            "date": event_date,
+            "days_left": (event_date - today).days,
+            "type": event["type"],
+            "name": event["event"],
+        })
+
+failed_tickers = []
+for ticker in dict.fromkeys(tickers):
+    yahoo_symbol = "BRK-B" if ticker == "BRK.B" else ticker
+    try:
+        dates = fetch_earnings_dates(yahoo_symbol)
+    except Exception:
+        failed_tickers.append(ticker)
+        continue
+
+    if dates and dates[0] <= last_day and dates[-1] >= today:
+        date_label = str(dates[0]) if len(dates) == 1 else f"{dates[0]} 至 {dates[-1]}"
+        display_date = max(today, dates[0])
+        calendar_list.append({
+            "date": display_date,
+            "days_left": (display_date - today).days,
+            "type": "🔥 个股财报",
+            "name": f"【{ticker}】财报公布日期（Yahoo Finance：{date_label}）",
+        })
+
+if failed_tickers:
+    st.warning("部分代码的财报日历查询失败：" + "、".join(failed_tickers))
 
 # 数据科学排序：严格按照日期从近到远升序排列
 calendar_df = pd.DataFrame(calendar_list)
@@ -131,23 +160,31 @@ if not calendar_df.empty:
         badge_color = "#FF4B4B" if row["days_left"] <= 5 else "#1f77b4"
         if "个股财报" in row["type"]: badge_color = "#ff7f0e"
         
+        countdown = "今天" if row["days_left"] == 0 else f"倒计时 {row['days_left']} 天"
         timeline_html += f"""
             <div style="display: flex; align-items: flex-start; margin-bottom: 15px; border-bottom: 1px dashed #dee2e6; padding-bottom: 10px;">
                 <div style="min-width: 110px; font-weight: bold; color: #495057; font-size: 14px;">📅 {row['date']}</div>
                 <div style="background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 15px; min-width: 75px; text-align: center; font-weight: bold;">
-                    倒计时 {row['days_left']} 天
+                    {countdown}
                 </div>
                 <div style="font-size: 13px; color: #212529;">
-                    <span style="font-weight: bold; color: {badge_color};">[{row['type']}]</span> {row['name']}
+                    <span style="font-weight: bold; color: {badge_color};">[{row['type']}]</span> {escape(row['name'])}
                 </div>
             </div>
         """
     timeline_html += "</div>"
     st.html(timeline_html)
 else:
-    st.info("☀️ 未来30天内暂无重磅宏观及个股财报大事件。")
+    st.info("☀️ 当前数据源未返回这 30 天内的事件。")
 
 st.markdown("---")
+
+@st.cache_data(ttl=86400)
+def get_ticker_type(ticker):
+    yahoo_symbol = "BRK-B" if ticker == "BRK.B" else ticker
+    quote_type = yf.Ticker(yahoo_symbol).get_info().get("quoteType")
+    return {"EQUITY": "个股", "ETF": "ETF"}.get(quote_type, "")
+
 
 # 5. 【首屏】：自适应响应式网格推荐卡片
 st.subheader("🚨 今日强力推荐")
@@ -166,10 +203,17 @@ if "建议行动" in summary_df.columns and not summary_df.empty:
             emoji = "🔴" if row_dict["建议行动"] == "买入" else "🟢"
             rank_badge = f'<span style="background-color:{border_color}; color:white; padding:2px 6px; border-radius:4px; font-size:11px; margin-right:5px;">🔥 TOP {idx+1}</span>' if idx < 3 else ''
             
+            ticker = row_dict["Ticker"]
+            try:
+                ticker_type = get_ticker_type(ticker)
+            except Exception:
+                ticker_type = ""
+            ticker_label = f"{escape(ticker)}（{ticker_type}）" if ticker_type else escape(ticker)
+
             card_html = f"""
                 <div style="flex: 1 1 290px; max-width: 360px; background-color: {bg_color}; border: 1px solid {border_color}; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); margin-bottom: 5px;">
                     <h4 style="margin: 0 0 8px 0; color: {text_color}; font-size: 16px;">
-                        {rank_badge}{emoji} 【{row_dict['建议行动']}】{row_dict['Ticker']}
+                        {rank_badge}{emoji} 【{row_dict['建议行动']}】{ticker_label}
                     </h4>
                     <p style="margin: 0; font-size: 13px; color: #31333F; line-height: 1.45;">
                         <b>当前价:</b> ${row_dict['当前价格']} | <b>市值:</b> {row_dict['市值']}<br>
